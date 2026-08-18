@@ -23,8 +23,8 @@ def load_matrix():
                 missing = [k for k in ("family", "harness", "model", "pool", "weight") if k not in e]
                 if missing:
                     raise SystemExit(
-                        f"routing.json: l'executor '{e.get('model', '?')}' a {tier} non ha {', '.join(missing)}. "
-                        "Aggiungi i modelli con `route.py add`, che compila tutti i campi.")
+                        f"routing.json: executor '{e.get('model', '?')}' at {tier} is missing "
+                        f"{', '.join(missing)}. Add models with `route.py add`, which fills every field.")
         _CACHE = m
     return _CACHE
 
@@ -44,16 +44,16 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
         critical = critical or c.get("critical", False)
         why.append(f"classe {task_class} ({c['name']}): {c['what']}")
     if hard is None or spec is None or check is None:
-        raise ValueError("serve --class oppure tutti e tre --hard --spec --check")
+        raise ValueError("give --class, or all three of --hard --spec --check")
     for name, value in (("hard", hard), ("spec", spec), ("check", check)):
         if not 0 <= value <= 5:
-            raise ValueError(f"{name}={value}: gli assi vanno da 0 a 5")
+            raise ValueError(f"{name}={value}: the axes run from 0 to 5")
     if files < 0:
-        raise ValueError(f"files={files}: non puo' essere negativo")
+        raise ValueError(f"files={files}: cannot be negative")
     for name, value in pool_used.items():
         if not 0 <= value <= 1:
-            raise ValueError(f"quota del pool '{name}' = {value}: va da 0 a 1 "
-                             "(usa 0.4 per il 40%, non 40)")
+            raise ValueError(f"pool '{name}' usage = {value}: it runs from 0 to 1 "
+                             "(0.4 for 40%, not 40)")
 
     i = max(0, min(5, hard))
     why.append(f"hard={hard} -> {TIERS[i]}")
@@ -69,53 +69,54 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
 
     blocked = None
     if attempt < 0:
-        raise ValueError(f"attempt={attempt}: non puo' essere negativo")
+        raise ValueError(f"attempt={attempt}: cannot be negative")
     up = max(0, min(attempt, p["max_upshifts"]))
     if up:
         i += up
         why.append(f"attempt {attempt}: upshift {up} (carry the failure evidence, do not restart)")
     if attempt > p["max_upshifts"]:
-        blocked = (f"{p['max_upshifts']} escalation gia' fatte senza risultato: "
-                   "serve una decisione umana, non un altro tentativo")
+        blocked = (f"{p['max_upshifts']} escalations already spent without a result: "
+                   "this needs a human decision, not another attempt")
         why.append(blocked)
 
     i = max(0, min(5, i))
     tier = TIERS[i]
 
-    if spec >= p["spec_codex_min"]:
-        family, fwhy = "codex", f"spec={spec}: target is fully specified -> executor family"
-    elif spec <= p["spec_claude_max"]:
-        family, fwhy = "claude", f"spec={spec}: target is ambiguous -> judgement family"
+    judgement, execution = p["judgement_family"], p["execution_family"]
+    if spec >= p["spec_execution_min"]:
+        family, fwhy = execution, f"spec={spec}: target is fully specified -> execution family"
+    elif spec <= p["spec_judgement_max"]:
+        family, fwhy = judgement, f"spec={spec}: target is ambiguous -> judgement family"
     else:
-        family = "claude" if hard >= 4 else "codex"
+        family = judgement if hard >= 4 else execution
         fwhy = f"spec={spec} is borderline, hard={hard} decides -> {family}"
     why.append(fwhy)
 
     def preference(e):
-        # Prima il pool con piu' margine (quota ignota = 0.5, ne' libero ne' pieno);
-        # a pari margine, il modello che morde meno la quota del suo pool.
+        # Most headroom first (unknown usage counts as 0.5 — neither free nor full);
+        # on a tie, the model that bites less of its own pool.
         return (1.0 - pool_used.get(e["pool"], 0.5), -e["weight"])
 
     candidates = [e for e in m["executors"][tier] if e["family"] == family]
     if not candidates and family != p["judgement_family"]:
-        # Un compito completamente specificato puo' andare a chiunque stia a quel tier.
+        # A fully specified task may go to whoever sits at that tier.
         candidates = m["executors"][tier]
         if candidates:
-            why.append(f"nessun executor {family} a {tier}; il compito e' specificato abbastanza")
+            why.append(f"no {family} executor at {tier}; the task is specified enough")
     if candidates:
         ex = max(candidates, key=preference)
         if len(candidates) > 1:
-            why.append(f"{len(candidates)} modelli equivalenti a {tier}: scelto il pool '{ex['pool']}' "
-                       f"perche' ha piu' margine di quota")
+            why.append(f"{len(candidates)} equivalent models at {tier}: picked pool '{ex['pool']}' "
+                       f"because it has the most quota headroom")
     else:
-        # L'ambiguita' e' l'unica cosa che non si sostituisce: se a questo tier non c'e'
-        # la famiglia di giudizio, si sale finche' non compare.
+        # Ambiguity is the one thing never substituted away: if the judgement family
+        # is missing at this tier, climb until it appears.
         ex = None
         for j in range(i + 1, 6):
             up = [e for e in m["executors"][TIERS[j]] if e["family"] == family]
             if up:
                 ex = max(up, key=preference)
-                why.append(f"nessun executor {family} a {tier} e il compito e' ambiguo -> {TIERS[j]}")
+                why.append(f"no {family} executor at {tier} and the task is ambiguous -> {TIERS[j]}")
                 i, tier = j, TIERS[j]
                 break
         if ex is None:
@@ -123,11 +124,11 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
                 if m["executors"][TIERS[j]]:
                     ex = max(m["executors"][TIERS[j]], key=preference)
                     i, tier = j, TIERS[j]
-                    why.append(f"nessun executor {family} da nessuna parte: ripiego su {tier}")
+                    why.append(f"no {family} executor anywhere: falling back to {tier}")
                     break
         if ex is None:
-            raise SystemExit("routing.json non ha nemmeno un executer registrato: "
-                             "aggiungine uno con `route.py add`.")
+            raise SystemExit("routing.json has no executors at all: "
+                             "add one with `route.py add`.")
 
     ex, tier, i = _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
 
@@ -141,9 +142,9 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
             if reviewer:
                 break
         if reviewer is None:
-            blocked = (f"task critico ma tutti gli executor registrati sono di famiglia "
-                       f"'{ex['family']}': nessun secondo parere indipendente e' possibile. "
-                       "Registra un executor di un'altra famiglia prima di procedere.")
+            blocked = (f"critical task, but every registered executor is family '{ex['family']}': "
+                       "no independent second opinion is possible. Register an executor "
+                       "of another family before going ahead.")
             why.append(blocked)
 
     orch_i = TIERS.index(m["orchestrator_tier"].get(orchestrator, "T5"))
@@ -192,13 +193,13 @@ def _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
             cand_used = pool_used.get(cand["pool"])
             if cand_used is not None and cand_used >= p.get("pool_exhausted_at", 0.95):
                 continue
-            reason = "esaurito" if exhausted else f"sopra la riserva {info.get('reserve_above')}"
-            why.append(f"pool '{pool}' {reason} ({used:.0%} usato) e la classe non e' fra le sue riservate "
-                       f"-> passo a '{cand['pool']}' su {TIERS[j]}")
+            reason = "exhausted" if exhausted else f"past its {info.get('reserve_above'):.0%} reserve"
+            why.append(f"pool '{pool}' {reason} ({used:.0%} used) and this class is not one it reserves for "
+                       f"-> moving to '{cand['pool']}' at {TIERS[j]}")
             return cand, TIERS[j], j
 
-    why.append(f"ATTENZIONE: pool '{pool}' al {used:.0%} e nessun altro pool copre questo lavoro. "
-               "Aspetta il reset o registra un altro executor.")
+    why.append(f"WARNING: pool '{pool}' at {used:.0%} and no other pool covers this work. "
+               "Wait for the reset or register another executor.")
     return ex, tier, i
 
 
@@ -228,23 +229,23 @@ def selftest():
         except ValueError:
             pass
         else:
-            raise AssertionError(f"input assurdo accettato: {bad}")
-    r = route(task_class="S2")                               # le classi riempiono gli assi
+            raise AssertionError(f"nonsense input accepted: {bad}")
+    r = route(task_class="S2")                               # a class fills the axes
     assert r["tier"] == "T0", r["tier"]
     r = route(task_class="C2")
     assert r["reviewer"] and not r["worker_may_write"], r
-    # riserva: con Claude quasi pieno un M1 lascia il pool Claude, un C1 no
+    # reserve: with Claude nearly full an M1 leaves the Claude pool, a C1 does not
     full = {"claude": 0.9, "codex": 0.1}
     assert route(task_class="M1", pool_used=full)["executor"]["pool"] != "claude"
     assert route(task_class="C1", pool_used=full)["executor"]["pool"] == "claude"
-    # esaurito davvero: si sposta comunque, se esiste dove
+    # genuinely exhausted: it moves anyway, if there is anywhere to move
     assert route(task_class="S3", pool_used={"codex": 0.99})["executor"]["pool"] != "codex"
-    assert route(task_class="S1", attempt=3)["blocked"], "3 tentativi devono bloccare"
+    assert route(task_class="S1", attempt=3)["blocked"], "3 attempts must block"
     assert route(task_class="S1")["blocked"] is None
     solo_claude = {**load_matrix(), "executors": {t: [e for e in load_matrix()["executors"][t]
                                                      if e["family"] == "claude"] for t in TIERS}}
     r = route(task_class="C2", matrix=solo_claude)
-    assert r["blocked"] and r["reviewer"] is None, "critico senza 2a famiglia deve bloccare"
+    assert r["blocked"] and r["reviewer"] is None, "critical without a second family must block"
     r = route(hard=5, spec=2, check=0, orchestrator="opencode")
     assert r["orchestrator_must_delegate_decision"], r
     r = route(hard=5, spec=2, check=0, orchestrator="claude")
@@ -270,7 +271,7 @@ def cmd_list(m):
         print(f"  {name} {c['name']:11} {c['what']}")
     print()
     for name, info in m["pools"].items():
-        print(f"  pool {name:9} riserva sopra {info['reserve_above']:.0%} per {', '.join(info['reserve_for']) or '-'}"
+        print(f"  pool {name:9} reserved above {info['reserve_above']:.0%} for {', '.join(info['reserve_for']) or '-'}"
               f"  | quota: {info['quota_source']}")
     print("\norchestrators:", ", ".join(f"{k}={v}" for k, v in m["orchestrator_tier"].items()))
     print("judgement family (never substituted):", m["policy"]["judgement_family"])
@@ -288,11 +289,11 @@ def cmd_add(m, a):
     _save(m)
     print(f"added {a.model} at {a.tier} (family {a.family}, pool {e['pool']}, weight {a.weight})")
     if e["pool"] not in m["pools"]:
-        m["pools"][e["pool"]] = {"window": "da compilare", "quota_source": "n/d",
+        m["pools"][e["pool"]] = {"window": "fill this in", "quota_source": "n/a",
                                  "reserve_above": 1.01, "reserve_for": [],
-                                 "reserve_why": "nessuna riserva finche' non la configuri"}
+                                 "reserve_why": "no reserve until you configure one"}
         _save(m)
-        print(f"creato il pool '{e['pool']}': nessuna riserva finche' non la configuri in routing.json")
+        print(f"created pool '{e['pool']}': no reserve until you configure one in routing.json")
     if a.orchestrator:
         print(f"'{a.harness}' can now be used as --orchestrator, sitting at {a.tier}")
 
@@ -327,7 +328,7 @@ if __name__ == "__main__":
         cmd_list(m); raise SystemExit(0)
     if cmd == "remove":
         if len(argv) < 2:
-            raise SystemExit("uso: route.py remove <modello>   (route.py list per vederli)")
+            raise SystemExit("usage: route.py remove <model>   (route.py list shows them)")
         cmd_remove(m, argv[1]); raise SystemExit(0)
     if cmd == "add":
         ap = argparse.ArgumentParser(prog="route.py add",
@@ -340,9 +341,9 @@ if __name__ == "__main__":
         ap.add_argument("--model", required=True)
         ap.add_argument("--effort", default=None)
         ap.add_argument("--pool", default=None,
-                        help="l'abbonamento da cui pesca; default = il nome dell'harness")
+                        help="the subscription it draws on; defaults to the harness name")
         ap.add_argument("--weight", type=float, default=1.0,
-                        help="quanto morde la quota del suo pool, in relativo")
+                        help="how hard it bites its pool's quota, relative")
         ap.add_argument("--orchestrator", action="store_true",
                         help="also register this harness as one that can orchestrate, at this tier")
         cmd_add(m, ap.parse_args(argv[1:])); raise SystemExit(0)
@@ -351,12 +352,12 @@ if __name__ == "__main__":
                                  epilog="other commands: list | add | remove <model> | selftest")
     ap.add_argument("--task", default="", help="the task, for your own logs")
     ap.add_argument("--class", dest="task_class", choices=list(m["task_classes"]),
-                    help="classe del compito; riempie gli assi (route.py list per la definizione)")
+                    help="task class; fills the axes (route.py list defines them)")
     ap.add_argument("--hard", type=int, help="0-5 reasoning depth needed")
     ap.add_argument("--spec", type=int, help="0-5 how completely the target is specified")
     ap.add_argument("--check", type=int, help="0-5 how cheaply the result can be verified")
     ap.add_argument("--pool-used", dest="pool_used", default="",
-                    help="quota gia' consumata per pool, es. claude=0.7,codex=0.02 (quota.py la calcola)")
+                    help="quota already used per pool, e.g. claude=0.7,codex=0.02 (quota.py computes it)")
     ap.add_argument("--files", type=int, default=1)
     ap.add_argument("--critical", action="store_true", help="auth, payments, data loss, migration, infra, prod")
     ap.add_argument("--orchestrator", default="claude", help="the harness you launched: " + ", ".join(m["orchestrator_tier"]))
@@ -371,11 +372,11 @@ if __name__ == "__main__":
     for part in filter(None, a.pool_used.split(",")):
         name, sep, value = part.partition("=")
         if not sep or not value.strip():
-            raise SystemExit(f"--pool-used: '{part}' non ha un valore. Forma attesa: claude=0.4,codex=0.02")
+            raise SystemExit(f"--pool-used: '{part}' has no value. Expected form: claude=0.4,codex=0.02")
         try:
             used[name.strip()] = float(value)
         except ValueError:
-            raise SystemExit(f"--pool-used: '{value}' non e' un numero. Forma attesa: claude=0.4")
+            raise SystemExit(f"--pool-used: '{value}' is not a number. Expected form: claude=0.4")
     try:
         out = route(a.hard, a.spec, a.check, a.files, a.critical, a.orchestrator, a.attempt,
                     matrix=m, task_class=a.task_class, pool_used=used)

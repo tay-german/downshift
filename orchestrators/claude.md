@@ -37,15 +37,20 @@ most expensive mistake an orchestrator makes.
 5. **If `orchestrator_must_delegate_decision` is true, you are out of your depth.** Hand over the judgement,
    not just the work, and report the result without overruling it.
 
-## Classi e quota
+## Task classes and quota
 
-Invece dei tre assi puoi dare la classe: `--class S1|S2|S3|M1|M2|M3|C1|C2` (`route.py list` le definisce).
+Instead of the three axes you can name the class: `--class S1|S2|S3|M1|M2|M3|C1|C2`
+(`route.py list` defines each one).
 
-Passa sempre la quota, cosi' il router sposta il lavoro **prima** che un abbonamento si esaurisca:
+Always pass the quota, so work moves off a subscription **before** it runs out:
 
 ```bash
 python3 ~/downshift/route.py --class M1 --pool-used "$(python3 ~/downshift/quota.py --for-route)"
 ```
 
-Codex la sua quota la scrive nei log e viene letta da sola. Quella di Claude no: leggila da `/usage` e
-registrala con `quota.py --set claude=<percento>`. Un pool sconosciuto vale neutro, mai vuoto.
+Codex writes its own quota into its logs and it is read automatically. Claude does not: read it from
+`/usage` and record it with `quota.py --set claude=<percent>`. An unknown pool counts as neutral, never
+as empty.
+
+If the returned plan carries a **`blocked`** reason — two escalations already spent, or a critical task
+with no second family available to review it — stop and hand it back to a human.

@@ -96,8 +96,11 @@ python3 route.py remove qwen3-coder:30b
 ```
 
 - **`--tier`** T0–T5 is capability, not price.
-- **`--family`**: `claude` is the *judgement* family (`policy.judgement_family`) — the one you trust with
-  ambiguity. It is never substituted away; any other family may take a fully specified task.
+- **`--family`**: two roles, named in `policy` and renameable. The *judgement* family is the one you trust
+  with an ambiguous target and is never substituted away; the *execution* family takes fully specified work.
+- **`--pool`** is the subscription it draws on (defaults to the harness name, and a new pool is created with
+  no reserve until you configure one). **`--weight`** is how hard it bites that pool, and only breaks ties
+  between two models in the same pool.
 - **`--orchestrator`** registers the harness as one that can drive, at its own tier.
 
 ## How the axes work

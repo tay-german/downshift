@@ -1,5 +1,5 @@
 {
-  "$comment": "downshift routing matrix. Edit `executors` to match the models you actually pay for. Everything else is policy you probably want to keep.",
+  "$comment": "downshift routing matrix. Point `executors` at the models you actually have \u2014 `route.py add` writes the entries for you. Everything else is policy you probably want to keep.",
   "version": 1,
   "tiers": {
     "T0": {
@@ -135,24 +135,14 @@
       }
     ]
   },
-  "$cost_note": "Con abbonamento non si paga a token: si consuma QUOTA della finestra. Ogni executor punta a un pool (l'abbonamento da cui pesca) e ha un peso relativo. I pool sono separati: e' li' che sta il vero risparmio.",
+  "$cost_note": "On a subscription you do not pay per token, you consume a window. Every executor points at a pool (the subscription it draws on) and carries a relative weight. The pools are separate, and that is where the real saving lives.",
   "orchestrator_tier": {
     "opencode": "T0",
     "codex": "T4",
     "claude": "T5"
   },
   "policy": {
-    "base_tier_by_hard": [
-      "T0",
-      "T1",
-      "T2",
-      "T3",
-      "T4",
-      "T5"
-    ],
     "files_bump_at": 6,
-    "spec_codex_min": 4,
-    "spec_claude_max": 2,
     "downshift_check_min": 4,
     "critical_min_tier": "T4",
     "max_upshifts": 2,
@@ -165,98 +155,101 @@
       "lockfiles"
     ],
     "judgement_family": "claude",
-    "$judgement_family_note": "which executor family you trust with ambiguity; it is never substituted away",
-    "pool_exhausted_at": 0.95
+    "pool_exhausted_at": 0.95,
+    "spec_execution_min": 4,
+    "spec_judgement_max": 2,
+    "execution_family": "codex",
+    "$family_note": "Two roles, rename them to suit your stack: the judgement family is the one you trust with an ambiguous target and is never substituted away; the execution family takes fully specified work."
   },
   "pools": {
     "claude": {
-      "window": "5h + settimanale, condivisa da haiku/sonnet/opus e da claude.ai",
-      "quota_source": "manuale: /usage in Claude Code. Nessuna fonte locale affidabile (issue 35992, 44328)",
+      "window": "5h + weekly, shared by haiku/sonnet/opus and by claude.ai",
+      "quota_source": "manual: /usage in Claude Code. No reliable local source (issues 35992, 44328)",
       "reserve_above": 0.7,
       "reserve_for": [
         "C1",
         "C2",
         "M2"
       ],
-      "reserve_why": "sopra questa soglia il pool Claude resta per giudizio, debug e task critici"
+      "reserve_why": "above this, the Claude pool is kept for judgement, debugging and critical work"
     },
     "codex": {
-      "window": "5h + settimanale, condivisa da luna/terra/sol",
-      "quota_source": "reale: rate_limits.primary.used_percent nei log di sessione ~/.codex/sessions",
+      "window": "5h + weekly, shared by luna/terra/sol",
+      "quota_source": "measured: rate_limits.primary.used_percent in ~/.codex/sessions logs",
       "reserve_above": 0.75,
       "reserve_for": [
         "M1",
         "M3",
         "C2"
       ],
-      "reserve_why": "sopra questa soglia Codex resta per implementazione multi-file e secondo parere critico"
+      "reserve_why": "above this, Codex is kept for multi-file implementation and critical second opinions"
     },
     "opencode": {
-      "window": "modelli FREE, nessuna quota rilevante",
-      "quota_source": "n/d",
+      "window": "FREE models, no meaningful quota",
+      "quota_source": "n/a",
       "reserve_above": 1.01,
       "reserve_for": [],
-      "reserve_why": "gratis: si usa sempre dove il risultato e' verificabile subito"
+      "reserve_why": "free: always used where the result is instantly verifiable"
     }
   },
   "task_classes": {
     "S1": {
       "name": "lookup",
-      "what": "trovare, leggere, elencare, git log. Nessuna modifica.",
+      "what": "find, read, list, git log. No edit.",
       "hard": 0,
       "spec": 5,
       "check": 5
     },
     "S2": {
       "name": "meccanico",
-      "what": "modifica deterministica che lint/typecheck/grep chiudono: rinomina, format, import, docstring, boilerplate.",
+      "what": "deterministic edit that lint/typecheck/grep closes: rename, format, imports, docstrings, boilerplate.",
       "hard": 1,
       "spec": 5,
       "check": 5
     },
     "S3": {
       "name": "locale",
-      "what": "fix o funzioncina in 1-2 file, causa gia' nota, test esistente che lo copre.",
+      "what": "small fix or helper in 1-2 files, cause already known, covered by an existing test.",
       "hard": 2,
       "spec": 4,
       "check": 4
     },
     "M1": {
       "name": "feature",
-      "what": "spec chiara su 3-8 file, test da scrivere. Nessun giudizio lasciato aperto. Il test non c'e' ancora: la verifica non e' gratis.",
+      "what": "clear spec across 3-8 files, tests still to write. No judgement left open. The test does not exist yet, so verification is not free.",
       "hard": 3,
       "spec": 5,
       "check": 3
     },
     "M2": {
       "name": "debug",
-      "what": "test rosso o bug riproducibile ma causa da trovare.",
+      "what": "red test or reproducible bug, but the cause still has to be found.",
       "hard": 4,
       "spec": 2,
       "check": 5
     },
     "M3": {
       "name": "refactor",
-      "what": "oltre 8 file, o interfacce condivise, con target gia' deciso.",
+      "what": "more than 8 files, or shared interfaces, with the target already decided.",
       "hard": 4,
       "spec": 4,
       "check": 3
     },
     "C1": {
       "name": "design",
-      "what": "requisito ambiguo, trade-off, architettura, piano di migrazione.",
+      "what": "ambiguous requirement, trade-offs, architecture, migration plan.",
       "hard": 5,
       "spec": 1,
       "check": 0
     },
     "C2": {
       "name": "critico",
-      "what": "auth, sicurezza, pagamenti, cancellazione dati, migrazioni DB, infra, produzione.",
+      "what": "auth, security, payments, data deletion, DB migrations, infra, production.",
       "hard": 5,
       "spec": 3,
       "check": 2,
       "critical": true
     }
   },
-  "$weight_note": "weight = quanto quel modello morde la quota del suo pool, in relativo. Non e' un prezzo: serve solo a confrontare due opzioni dentro lo stesso pool."
+  "$weight_note": "weight = how hard that model bites its own pool's quota, relative. It is not a price: it only breaks ties between two options inside the same pool."
 }
