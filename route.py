@@ -29,8 +29,17 @@ def load_matrix():
     return _CACHE
 
 
+def find_executor(m, model):
+    """Locate a registered model. Returns (executor, tier) or (None, None)."""
+    for tier in TIERS:
+        for e in m["executors"][tier]:
+            if e["model"] == model:
+                return e, tier
+    return None, None
+
+
 def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrator="claude",
-          attempt=0, matrix=None, task_class=None, pool_used=None):
+          attempt=0, matrix=None, task_class=None, pool_used=None, force_model=None):
     m = matrix or load_matrix()
     p = m["policy"]
     pool_used = pool_used or {}
@@ -42,7 +51,7 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
         spec = c["spec"] if spec is None else spec
         check = c["check"] if check is None else check
         critical = critical or c.get("critical", False)
-        why.append(f"classe {task_class} ({c['name']}): {c['what']}")
+        why.append(f"class {task_class} ({c['name']}): {c['what']}")
     if hard is None or spec is None or check is None:
         raise ValueError("give --class, or all three of --hard --spec --check")
     for name, value in (("hard", hard), ("spec", spec), ("check", check)):
@@ -130,7 +139,18 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
             raise SystemExit("routing.json has no executors at all: "
                              "add one with `route.py add`.")
 
-    ex, tier, i = _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
+    # Your call beats the matrix: `pin` sticks to a class, `force_model` is one call only.
+    pinned = force_model or (m["task_classes"].get(task_class, {}).get("pin") if task_class else None)
+    if pinned:
+        forced, forced_tier = find_executor(m, pinned)
+        if forced is None:
+            raise ValueError(f"model '{pinned}' is not registered. `route.py list` shows what is, "
+                             "`route.py add` adds one.")
+        source = "--force-model" if force_model else f"pin on class {task_class}"
+        why.append(f"{source}: you chose {pinned}; the matrix would have said {ex['model']} at {tier}")
+        ex, tier, i = forced, forced_tier, TIERS.index(forced_tier)
+    else:
+        ex, tier, i = _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
 
     reviewer = None
     if critical:
@@ -158,6 +178,11 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
     return {
         "tier": tier, "tier_label": t["label"], "executor": ex, "reviewer": reviewer,
         "pool": ex["pool"], "task_class": task_class, "blocked": blocked,
+        "pinned_by_you": bool(pinned),
+        "summary": (f"{task_class or 'task'} -> {ex['harness']}/{ex['model']}"
+                    + (f" ({ex['effort']} effort)" if ex.get("effort") else "")
+                    + f"  [{tier} {t['label']}, pool {ex['pool']}, {t['context_budget']} tok]"
+                    + ("  <- your choice, not the matrix" if pinned else "")),
         "context_budget_tokens": t["context_budget"], "context_allow": t["allow"],
         "never_send": p["never_send"],
         "worker_may_write": not critical,
@@ -230,6 +255,17 @@ def selftest():
             pass
         else:
             raise AssertionError(f"nonsense input accepted: {bad}")
+    r = route(task_class="M1", force_model="claude-opus-5")  # your choice wins
+    assert r["executor"]["model"] == "claude-opus-5" and r["pinned_by_you"], r
+    try:
+        route(task_class="M1", force_model="does-not-exist")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unregistered model must be refused, not silently ignored")
+    pinned_matrix = load_matrix()
+    pinned_matrix["task_classes"]["S1"]["pin"] = "claude-opus-5"
+    assert route(task_class="S1", matrix=pinned_matrix)["executor"]["model"] == "claude-opus-5"
     r = route(task_class="S2")                               # a class fills the axes
     assert r["tier"] == "T0", r["tier"]
     r = route(task_class="C2")
@@ -268,7 +304,8 @@ def cmd_list(m):
             print(f"{t:5} {e['pool']:9} {e['family']:9} {e['model']:26} {e.get('effort','-'):7} {e['weight']}")
     print()
     for name, c in m["task_classes"].items():
-        print(f"  {name} {c['name']:11} {c['what']}")
+        pin = f"   [PINNED -> {c['pin']}]" if c.get("pin") else ""
+        print(f"  {name} {c['name']:11} {c['what']}{pin}")
     print()
     for name, info in m["pools"].items():
         print(f"  pool {name:9} reserved above {info['reserve_above']:.0%} for {', '.join(info['reserve_for']) or '-'}"
@@ -296,6 +333,21 @@ def cmd_add(m, a):
         print(f"created pool '{e['pool']}': no reserve until you configure one in routing.json")
     if a.orchestrator:
         print(f"'{a.harness}' can now be used as --orchestrator, sitting at {a.tier}")
+
+
+def cmd_pin(m, task_class, model):
+    if task_class not in m["task_classes"]:
+        raise SystemExit(f"unknown class '{task_class}'. Known: {', '.join(m['task_classes'])}")
+    if model is None:
+        m["task_classes"][task_class].pop("pin", None)
+        _save(m)
+        print(f"{task_class} is back on the matrix")
+        return
+    if find_executor(m, model)[0] is None:
+        raise SystemExit(f"model '{model}' is not registered. `route.py list` shows what is.")
+    m["task_classes"][task_class]["pin"] = model
+    _save(m)
+    print(f"{task_class} now always goes to {model}, whatever the matrix says")
 
 
 def cmd_remove(m, model):
@@ -326,6 +378,11 @@ if __name__ == "__main__":
         selftest(); raise SystemExit(0)
     if cmd == "list":
         cmd_list(m); raise SystemExit(0)
+    if cmd in ("pin", "unpin"):
+        if len(argv) < 2:
+            raise SystemExit("usage: route.py pin <CLASS> <model>   |   route.py unpin <CLASS>")
+        cmd_pin(m, argv[1], argv[2] if cmd == "pin" and len(argv) > 2 else None)
+        raise SystemExit(0)
     if cmd == "remove":
         if len(argv) < 2:
             raise SystemExit("usage: route.py remove <model>   (route.py list shows them)")
@@ -349,7 +406,8 @@ if __name__ == "__main__":
         cmd_add(m, ap.parse_args(argv[1:])); raise SystemExit(0)
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
-                                 epilog="other commands: list | add | remove <model> | selftest")
+                                 epilog="other commands: list | add | remove <model> | "
+                                        "pin <CLASS> <model> | unpin <CLASS> | selftest")
     ap.add_argument("--task", default="", help="the task, for your own logs")
     ap.add_argument("--class", dest="task_class", choices=list(m["task_classes"]),
                     help="task class; fills the axes (route.py list defines them)")
@@ -362,6 +420,9 @@ if __name__ == "__main__":
     ap.add_argument("--critical", action="store_true", help="auth, payments, data loss, migration, infra, prod")
     ap.add_argument("--orchestrator", default="claude", help="the harness you launched: " + ", ".join(m["orchestrator_tier"]))
     ap.add_argument("--attempt", type=int, default=0, help="0 first try, 1..2 after a failure")
+    ap.add_argument("--force-model", dest="force_model", default=None,
+                    help="use this model for this one call, whatever the matrix says")
+    ap.add_argument("--plain", action="store_true", help="one readable line instead of JSON")
     a = ap.parse_args()
     if a.orchestrator not in m["orchestrator_tier"]:
         raise SystemExit(
@@ -379,8 +440,17 @@ if __name__ == "__main__":
             raise SystemExit(f"--pool-used: '{value}' is not a number. Expected form: claude=0.4")
     try:
         out = route(a.hard, a.spec, a.check, a.files, a.critical, a.orchestrator, a.attempt,
-                    matrix=m, task_class=a.task_class, pool_used=used)
+                    matrix=m, task_class=a.task_class, pool_used=used, force_model=a.force_model)
     except ValueError as error:
         raise SystemExit(f"route.py: {error}")
     out["task"] = a.task
-    print(json.dumps(out, indent=2))
+    if a.plain:
+        print(out["summary"])
+        if out["reviewer"]:
+            print(f"  second opinion: {out['reviewer']['harness']}/{out['reviewer']['model']}")
+        if out["blocked"]:
+            print(f"  BLOCKED: {out['blocked']}")
+        for line in out["why"]:
+            print(f"  · {line}")
+    else:
+        print(json.dumps(out, indent=2))
