@@ -241,19 +241,23 @@ def _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
     if not exhausted and (used < info.get("reserve_above", 1.01) or reserved):
         return ex, tier, i, None
 
+    ceiling = p.get("pool_exhausted_at", 0.95)
     for j in range(i, 6):
-        for cand in m["executors"][TIERS[j]]:
-            if cand["pool"] == pool:
-                continue
-            if family == p["judgement_family"] and cand["family"] != family:
-                continue
-            cand_used = pool_used.get(cand["pool"])
-            if cand_used is not None and cand_used >= p.get("pool_exhausted_at", 0.95):
-                continue
-            reason = "exhausted" if exhausted else f"past its {info.get('reserve_above'):.0%} reserve"
-            why.append(f"pool '{pool}' {reason} ({used:.0%} used) and this class is not one it reserves for "
-                       f"-> moving to '{cand['pool']}' at {TIERS[j]}")
-            return cand, TIERS[j], j, None
+        # Among the alternatives take the emptiest pool, not the first one in JSON order:
+        # moving from a pool at 75% to one at 94% is not a remedy.
+        alternatives = [
+            cand for cand in m["executors"][TIERS[j]]
+            if cand["pool"] != pool
+            and not (family == p["judgement_family"] and cand["family"] != family)
+            and pool_used.get(cand["pool"], 0.0) < ceiling
+        ]
+        if not alternatives:
+            continue
+        cand = min(alternatives, key=lambda c: pool_used.get(c["pool"], 0.5))
+        reason = "exhausted" if exhausted else f"past its {info.get('reserve_above'):.0%} reserve"
+        why.append(f"pool '{pool}' {reason} ({used:.0%} used) and this class is not one it reserves for "
+                   f"-> moving to '{cand['pool']}' at {TIERS[j]}")
+        return cand, TIERS[j], j, None
 
     warning = (f"pool '{pool}' at {used:.0%} and no other pool covers this work — the judgement "
                "family lives in one pool only. Wait for the reset or register an executor of that "
