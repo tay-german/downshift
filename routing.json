@@ -201,14 +201,14 @@
       "check": 5
     },
     "S2": {
-      "name": "meccanico",
+      "name": "mechanical",
       "what": "deterministic edit that lint/typecheck/grep closes: rename, format, imports, docstrings, boilerplate.",
       "hard": 1,
       "spec": 5,
       "check": 5
     },
     "S3": {
-      "name": "locale",
+      "name": "local",
       "what": "small fix or helper in 1-2 files, cause already known, covered by an existing test.",
       "hard": 2,
       "spec": 4,
@@ -243,7 +243,7 @@
       "check": 0
     },
     "C2": {
-      "name": "critico",
+      "name": "critical",
       "what": "auth, security, payments, data deletion, DB migrations, infra, production.",
       "hard": 5,
       "spec": 3,

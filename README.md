@@ -40,6 +40,30 @@ Haiku for "simple, high-volume" work and the most rate-limit-efficient option, S
 real work", Opus for what is "genuinely hard" and for the parent agent that plans and integrates
 ([Anthropic](https://claude.com/resources/tutorials/choosing-the-right-claude-model)).
 
+## Seeing it, and overriding it
+
+Every decision prints as one line, and says what the matrix would have chosen if you overrode it:
+
+```bash
+$ python3 route.py --class M1 --plain
+M1 -> codex/gpt-5.6-terra (medium effort)  [T3 workhorse, pool codex, 16000 tok]
+  · class M1 (feature): clear spec across 3-8 files, tests still to write...
+  · hard=3 -> T3
+  · spec=5: target is fully specified -> execution family
+```
+
+The matrix is a default, not a verdict. Override it for one call, or for good:
+
+```bash
+python3 route.py --class S3 --force-model claude-opus-5 --plain   # this call only
+python3 route.py pin M1 gpt-5.6-sol                               # every M1 from now on
+python3 route.py unpin M1                                         # back to the matrix
+```
+
+A pin shows up in `route.py list`, and every plan carries `pinned_by_you` plus a line naming what the
+matrix would have picked — so an override you set months ago never quietly becomes the new normal.
+An unregistered model is refused rather than silently ignored.
+
 ## Pools and the reserve rule
 
 Every executor belongs to a pool — the subscription it draws on. **Tiers inside a pool share one window**:
