@@ -9,7 +9,7 @@ here with its age: an old number is shown as old, never passed off as current.
   quota.py --for-route          -> "claude=0.40,codex=0.02" to hand to route.py
   quota.py --set claude=0.40    -> record what /usage showed you
 """
-import json, re, sys, time
+import json, os, re, sys, tempfile, time
 from pathlib import Path
 
 STATE = Path.home() / ".downshift-quota.json"
@@ -19,14 +19,22 @@ STALE_HOURS = 3
 def codex_pool():
     """rate_limits from the latest session rollout. Measured, not estimated."""
     root = Path.home() / ".codex" / "sessions"
-    files = sorted(root.rglob("rollout-*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-    for path in files[:5]:
-        hits = re.findall(r'"rate_limits":\s*(\{.*?"credits")', path.read_text(errors="ignore"))
-        if not hits:
+    dated = []
+    for path in root.rglob("rollout-*.jsonl"):
+        try:                                     # un file puo' sparire durante la scansione
+            dated.append((path.stat().st_mtime, path))
+        except OSError:
             continue
-        raw = json.loads(hits[-1].rsplit(',"credits', 1)[0] + "}")
-        primary = raw.get("primary") or {}
-        if "used_percent" not in primary:
+    for _, path in sorted(dated, reverse=True)[:5]:
+        try:
+            hits = re.findall(r'"rate_limits":\s*(\{.*?"credits")', path.read_text(errors="ignore"))
+            if not hits:
+                continue
+            raw = json.loads(hits[-1].rsplit(',"credits', 1)[0] + "}")
+        except (OSError, ValueError):
+            continue
+        primary = raw.get("primary") if isinstance(raw, dict) else None
+        if not isinstance(primary, dict) or not isinstance(primary.get("used_percent"), (int, float)):
             continue
         return {"used": round(primary["used_percent"] / 100, 4),
                 "window_minutes": primary.get("window_minutes"),
@@ -56,12 +64,28 @@ def snapshot():
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args and args[0] == "--set":
-        state = json.loads(STATE.read_text()) if STATE.exists() else {}
+        try:
+            state = json.loads(STATE.read_text()) if STATE.exists() else {}
+            if not isinstance(state, dict):
+                state = {}
+        except ValueError:
+            state = {}
         for part in args[1:]:
-            name, _, value = part.partition("=")
-            v = float(value)
-            state[name] = {"used": v / 100 if v > 1 else v, "at": time.time()}
-        STATE.write_text(json.dumps(state, indent=2))
+            name, sep, value = part.partition("=")
+            if not sep:
+                raise SystemExit(f"--set: '{part}' has no value. Expected form: claude=40")
+            try:
+                v = float(value)
+            except ValueError:
+                raise SystemExit(f"--set: '{value}' is not a number")
+            v = v / 100 if v > 1 else v
+            if not 0 <= v <= 1:
+                raise SystemExit(f"--set {name}: {value} is out of range (0-100%)")
+            state[name.strip()] = {"used": v, "at": time.time()}
+        fd, temp = tempfile.mkstemp(dir=str(STATE.parent), prefix=".quota.")
+        with os.fdopen(fd, "w") as handle:
+            json.dump(state, handle, indent=2)
+        os.replace(temp, STATE)
         print(f"recorded: {', '.join(args[1:])}")
     elif args and args[0] == "--for-route":
         # Stale readings stay out of routing: "unknown" (neutral) beats an arbitrarily

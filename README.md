@@ -189,11 +189,37 @@ switching before exhaustion, and an orchestrator whose own tier is an input.
 
 ## What this does not claim
 
-No benchmark. I have not measured a savings figure across a task suite, so none is quoted here. The
-mechanism is stated instead, and `route.py` prints the reason for every decision so you can audit it
-against your own usage rather than trust a number.
+**Every number in `routing.json` is a prior, not a measurement.** The reserve thresholds (0.70, 0.75), the
+exhaustion point (0.95), the file bump at 6, the `check >= 4` downshift, the weights 1–5 and the context
+budgets 2k–48k are hand-chosen. They are not calibrated against anything. `0.70` looks measured and is not:
+0.55 would have the same evidence behind it, which is none. The vendor guidance linked above justifies
+"small model for simple work, strong model for hard work" and nothing more precise than that.
+
+**No benchmark.** I have not measured a savings figure across a task suite, so none is quoted. Nor have I
+measured the overhead: classifying, reading quota and handing a task to another CLI costs tokens and
+latency, and for a small task that overhead can plausibly exceed what routing saves. That break-even is
+unmeasured.
+
+**The system does not learn.** Nothing connects the prediction (`hard`/`spec`/`check`) to what actually
+happened. A tier that was wrong stays wrong; escalation after a failure is a retry, not feedback. And the
+axes are estimated by the same model that then does the work — in particular `check`, where a model
+predicting "a test will settle this" is the least reliable judge available.
+
+**Read `route.py --plain` output, not the config, to know why something was routed.** The reasons are
+printed for exactly this purpose: so you can disagree with a prior instead of inheriting it.
 
 It does not proxy traffic, does not make a weak model strong, and cannot read Claude's quota for you.
+
+### Context budgets: what is actually enforced
+
+The budget is applied in code when the work goes to Codex or OpenCode — the task text and the file list are
+truncated to fit, and the worker is told what was cut. Character count divided by four stands in for a
+tokenizer; it is an approximation, and it is labelled as one. If the bare constraints do not fit the tier's
+budget, the call fails and escalates instead of sending a mutilated prompt — a context that does not fit is
+evidence the tier is wrong.
+
+For an in-session Claude worker the budget is still an instruction, not a limit: nothing truncates what a
+subagent reads.
 
 ## License
 

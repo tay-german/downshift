@@ -29,6 +29,22 @@ def load_matrix():
     return _CACHE
 
 
+def infer_task_class(m, hard, spec, check, critical):
+    """Nearest class for a set of axes, so callers who score by hand still get class rules.
+
+    Without this, a caller passing only axes had task_class=None, and every rule keyed on
+    the class — the pool reserves above all — silently never fired.
+    """
+    best, best_distance = None, None
+    for name, c in m["task_classes"].items():
+        if bool(c.get("critical")) != bool(critical):
+            continue
+        distance = abs(c["hard"] - hard) + abs(c["spec"] - spec) + abs(c["check"] - check)
+        if best_distance is None or distance < best_distance:
+            best, best_distance = name, distance
+    return best
+
+
 def find_executor(m, model):
     """Locate a registered model. Returns (executor, tier) or (None, None)."""
     for tier in TIERS:
@@ -54,6 +70,11 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
         why.append(f"class {task_class} ({c['name']}): {c['what']}")
     if hard is None or spec is None or check is None:
         raise ValueError("give --class, or all three of --hard --spec --check")
+    if task_class is None:
+        task_class = infer_task_class(m, hard, spec, check, critical)
+        if task_class:
+            why.append(f"no class given: nearest is {task_class} "
+                       f"({m['task_classes'][task_class]['name']}), and its rules apply")
     for name, value in (("hard", hard), ("spec", spec), ("check", check)):
         if not 0 <= value <= 5:
             raise ValueError(f"{name}={value}: the axes run from 0 to 5")
@@ -140,6 +161,7 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
                              "add one with `route.py add`.")
 
     # Your call beats the matrix: `pin` sticks to a class, `force_model` is one call only.
+    pool_warning = None
     pinned = force_model or (m["task_classes"].get(task_class, {}).get("pin") if task_class else None)
     if pinned:
         forced, forced_tier = find_executor(m, pinned)
@@ -149,8 +171,14 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
         source = "--force-model" if force_model else f"pin on class {task_class}"
         why.append(f"{source}: you chose {pinned}; the matrix would have said {ex['model']} at {tier}")
         ex, tier, i = forced, forced_tier, TIERS.index(forced_tier)
+        floor = TIERS.index(p["critical_min_tier"])
+        if critical and i < floor:
+            blocked = (f"you forced {pinned} ({tier}) on a critical task, below the "
+                       f"{p['critical_min_tier']} floor. Allowed, but not silently: confirm it yourself.")
+            why.append(blocked)
     else:
-        ex, tier, i = _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
+        ex, tier, i, pool_warning = _respect_pool_reserve(
+            m, ex, tier, i, family, task_class, pool_used, why, p)
 
     reviewer = None
     if critical:
@@ -167,7 +195,11 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
                        "of another family before going ahead.")
             why.append(blocked)
 
-    orch_i = TIERS.index(m["orchestrator_tier"].get(orchestrator, "T5"))
+    known_orchestrator = orchestrator in m["orchestrator_tier"]
+    if not known_orchestrator:
+        why.append(f"orchestrator '{orchestrator}' is not registered: treated as T0, "
+                   "so it defers instead of assuming it is capable")
+    orch_i = TIERS.index(m["orchestrator_tier"].get(orchestrator, "T0"))
     delegate_decision = orch_i < i
     if delegate_decision:
         why.append(
@@ -178,7 +210,7 @@ def route(hard=None, spec=None, check=None, files=1, critical=False, orchestrato
     return {
         "tier": tier, "tier_label": t["label"], "executor": ex, "reviewer": reviewer,
         "pool": ex["pool"], "task_class": task_class, "blocked": blocked,
-        "pinned_by_you": bool(pinned),
+        "pinned_by_you": bool(pinned), "pool_warning": pool_warning,
         "summary": (f"{task_class or 'task'} -> {ex['harness']}/{ex['model']}"
                     + (f" ({ex['effort']} effort)" if ex.get("effort") else "")
                     + f"  [{tier} {t['label']}, pool {ex['pool']}, {t['context_budget']} tok]"
@@ -203,11 +235,11 @@ def _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
     info = m["pools"].get(pool, {})
     used = pool_used.get(pool)
     if used is None:
-        return ex, tier, i
+        return ex, tier, i, None
     exhausted = used >= p.get("pool_exhausted_at", 0.95)
     reserved = task_class in info.get("reserve_for", [])
     if not exhausted and (used < info.get("reserve_above", 1.01) or reserved):
-        return ex, tier, i
+        return ex, tier, i, None
 
     for j in range(i, 6):
         for cand in m["executors"][TIERS[j]]:
@@ -221,11 +253,13 @@ def _respect_pool_reserve(m, ex, tier, i, family, task_class, pool_used, why, p)
             reason = "exhausted" if exhausted else f"past its {info.get('reserve_above'):.0%} reserve"
             why.append(f"pool '{pool}' {reason} ({used:.0%} used) and this class is not one it reserves for "
                        f"-> moving to '{cand['pool']}' at {TIERS[j]}")
-            return cand, TIERS[j], j
+            return cand, TIERS[j], j, None
 
-    why.append(f"WARNING: pool '{pool}' at {used:.0%} and no other pool covers this work. "
-               "Wait for the reset or register another executor.")
-    return ex, tier, i
+    warning = (f"pool '{pool}' at {used:.0%} and no other pool covers this work — the judgement "
+               "family lives in one pool only. Wait for the reset or register an executor of that "
+               "family elsewhere.")
+    why.append(f"WARNING: {warning}")
+    return ex, tier, i, warning
 
 
 def selftest():
@@ -292,8 +326,20 @@ def selftest():
 
 
 def _save(m):
+    """Atomic write: `add`, `remove` and `pin` used to be able to leave half a JSON behind."""
     global _CACHE
-    MATRIX.write_text(json.dumps(m, indent=2) + "\n")
+    import os
+    import tempfile
+
+    fd, temp = tempfile.mkstemp(dir=str(MATRIX.parent), prefix=".routing.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(m, handle, indent=2)
+            handle.write("\n")
+        os.replace(temp, MATRIX)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
     _CACHE = m
 
 
